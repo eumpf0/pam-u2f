@@ -5,6 +5,7 @@
 #ifndef UTIL_H
 #define UTIL_H
 
+#include <fido/types.h>
 #include <stdio.h>
 #include <security/pam_appl.h>
 
@@ -52,6 +53,14 @@ typedef struct {
   char *attributes;
   int old_format;
 } device_t;
+
+typedef struct {
+  fido_dev_info_t* list;
+  size_t nallocated;
+} fido_devlist;
+
+fido_devlist new_devlist(const cfg_t *cfg);
+void free_devlist(const cfg_t *cfg, fido_devlist* devlist);
 
 int get_devices_from_authfile(const cfg_t *cfg, const char *username,
                               device_t *devices, unsigned *n_devs);

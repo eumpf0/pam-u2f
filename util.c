@@ -44,6 +44,9 @@
 #define SSH_SK_USER_VERIFICATION_REQD 0x04
 #define SSH_SK_RESIDENT_KEY 0x20
 
+#define DEVLIST_INITIAL_LENGTH 32
+#define DEVLIST_MISMATCH_WARN
+
 struct opts {
   fido_opt_t up;
   fido_opt_t uv;
@@ -1132,10 +1135,45 @@ err:
   return ok;
 }
 
+fido_devlist new_devlist(const cfg_t* cfg) {
+  fido_devlist devlist;
+  devlist.list = NULL;
+  devlist.nallocated = DEVLIST_INITIAL_LENGTH;
+
+  while (true) {
+    devlist.list = fido_dev_info_new(devlist.nallocated);
+    if (devlist.list)
+      break;
+    else if (errno == ENOMEM && devlist.nallocated > 1) {
+      debug_dbg(cfg, "Unable to allocate devlist with length %zu, trying half length", devlist.nallocated);
+      devlist.nallocated /= 2;
+    } else {
+      debug_dbg(cfg, "Unable to allocate devlist");
+      devlist.nallocated = 0;
+      break;
+    }
+  }
+  return devlist;
+}
+
+void free_devlist(const cfg_t *cfg, fido_devlist *devlist) {
+  if (devlist->list) {
+    fido_dev_info_free(&(devlist->list), devlist->nallocated);
+    devlist->nallocated = 0;
+    debug_dbg(cfg, "Deallocated devlist");
+  } else {
+# ifdef DEVLIST_MISMATCH_WARN
+    if (devlist->nallocated != 0)
+      debug_dbg(cfg, "Mismatched devlist length (%zu): not zero but devlist already freed", devlist->nallocated);
+    else
+# endif
+    debug_dbg(cfg, "Nothing to deallocate: devlist already freed");
+  }
+}
+
 int do_authentication(const cfg_t *cfg, const device_t *devices,
                       const unsigned n_devs, pam_handle_t *pamh) {
   fido_assert_t *assert = NULL;
-  fido_dev_info_t *devlist = NULL;
   fido_dev_t **authlist = NULL;
   int cued = 0;
   int r;
@@ -1155,13 +1193,11 @@ int do_authentication(const cfg_t *cfg, const device_t *devices,
 #endif
   memset(&pk, 0, sizeof(pk));
 
-  devlist = fido_dev_info_new(64);
-  if (!devlist) {
-    debug_dbg(cfg, "Unable to allocate devlist");
+  fido_devlist devlist = new_devlist(cfg);
+  if (devlist.nallocated == 0)
     goto out;
-  }
 
-  r = fido_dev_info_manifest(devlist, 64, &ndevs);
+  r = fido_dev_info_manifest(devlist.list, devlist.nallocated, &ndevs);
   if (r != FIDO_OK) {
     debug_dbg(cfg, "Unable to discover device(s), %s (%d)", fido_strerr(r), r);
     goto out;
@@ -1171,7 +1207,7 @@ int do_authentication(const cfg_t *cfg, const device_t *devices,
 
   debug_dbg(cfg, "Device max index is %zu", ndevs);
 
-  authlist = calloc(64 + 1, sizeof(fido_dev_t *));
+  authlist = calloc(devlist.nallocated + 1, sizeof(fido_dev_t *));
   if (!authlist) {
     debug_dbg(cfg, "Unable to allocate authenticator list");
     goto out;
@@ -1200,7 +1236,7 @@ int do_authentication(const cfg_t *cfg, const device_t *devices,
       goto out;
     }
 
-    if (get_authenticators(cfg, devlist, ndevs, assert,
+    if (get_authenticators(cfg, devlist.list, ndevs, assert,
                            is_resident(devices[i].keyHandle), authlist)) {
       for (size_t j = 0; authlist[j] != NULL; j++) {
         /* options used during authentication */
@@ -1264,16 +1300,12 @@ int do_authentication(const cfg_t *cfg, const device_t *devices,
     }
 
     i++;
-
-    fido_dev_info_free(&devlist, ndevs);
-
-    devlist = fido_dev_info_new(64);
-    if (!devlist) {
-      debug_dbg(cfg, "Unable to allocate devlist");
+    free_devlist(cfg, &devlist);
+    devlist = new_devlist(cfg);
+    if (!(devlist.list))
       goto out;
-    }
 
-    r = fido_dev_info_manifest(devlist, 64, &ndevs);
+    r = fido_dev_info_manifest(devlist.list, devlist.nallocated, &ndevs);
     if (r != FIDO_OK) {
       debug_dbg(cfg, "Unable to discover device(s), %s (%d)", fido_strerr(r),
                 r);
@@ -1299,7 +1331,7 @@ int do_authentication(const cfg_t *cfg, const device_t *devices,
 out:
   reset_pk(&pk);
   fido_assert_free(&assert);
-  fido_dev_info_free(&devlist, ndevs);
+  free_devlist(cfg, &devlist);
 
   if (authlist) {
     for (size_t j = 0; authlist[j] != NULL; j++) {
